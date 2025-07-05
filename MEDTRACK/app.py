@@ -1,6 +1,7 @@
 from flask import Flask, render_template, request, redirect, url_for, session, flash
 from datetime import datetime
 import uuid
+import boto3  # <-- AWS SDK added
 
 app = Flask(__name__)
 app.secret_key = 'your_secret_key'
@@ -8,6 +9,18 @@ app.secret_key = 'your_secret_key'
 # Temporary in-memory "databases"
 users = {}
 appointments = []
+
+# AWS Setup
+dynamodb = boto3.resource('dynamodb', region_name='us-east-1')  # ✅ Set your region
+sns = boto3.client('sns', region_name='us-east-1')
+
+# DynamoDB tables
+users_table = dynamodb.Table('Users')  # Ensure this table exists in AWS
+appointments_table = dynamodb.Table('Appointments')
+
+# Your SNS Topic ARN (replace with real one)
+sns_topic_arn = 'arn:aws:sns:us-east-1:123456789012:YourSNSTopic'  # <-- Replace with actual ARN
+
 
 @app.route('/')
 def index():
@@ -28,6 +41,24 @@ def signup():
             flash('Passwords do not match.', 'error')
         else:
             users[username] = {'email': email, 'password': password}
+
+            # ✅ Save user to DynamoDB
+            try:
+                users_table.put_item(Item={
+                    'username': username,
+                    'email': email,
+                    'password': password
+                })
+
+                # ✅ Send SNS notification
+                sns.publish(
+                    TopicArn=sns_topic_arn,
+                    Message=f"New user signup: {username} ({email})",
+                    Subject="Signup Alert"
+                )
+            except Exception as e:
+                flash(f"DynamoDB/SNS error: {str(e)}", 'error')
+
             flash('Signup successful! Please log in.', 'success')
             return redirect(url_for('login'))
 
@@ -106,12 +137,24 @@ def book_appointment():
             'reason': request.form.get('reason', '')
         }
         appointments.append(appointment)
+
+        # ✅ Save appointment to DynamoDB
+        try:
+            appointments_table.put_item(Item=appointment)
+
+            # ✅ Send SNS notification
+            sns.publish(
+                TopicArn=sns_topic_arn,
+                Message=f"New appointment booked by {appointment['user']} with Dr. {appointment['doctor']} on {appointment['date']} at {appointment['time']}",
+                Subject="New Appointment Booking"
+            )
+        except Exception as e:
+            flash(f"DynamoDB/SNS error: {str(e)}", 'error')
+
         flash('Appointment booked successfully! Redirecting to home page...', 'success')
-        return redirect(url_for('home'))  # Correct function name
+        return redirect(url_for('home'))
 
     return render_template('book_appointment.html')
-
-
 
 
 @app.route('/contact', methods=['GET', 'POST'])
@@ -139,9 +182,7 @@ def doctor_dashboard():
     doctor_name = session['username']
     today = datetime.today().strftime('%Y-%m-%d')
 
-    # Filter appointments for this doctor
     doctor_appts = [a for a in appointments if a['doctor'] == doctor_name]
-
     total_appointments = len(doctor_appts)
     pending_appointments = [a for a in doctor_appts if a['date'] >= today]
 
@@ -151,6 +192,7 @@ def doctor_dashboard():
         pending_appointments=len(pending_appointments),
         appointments_list=doctor_appts
     )
+
 
 @app.route('/patient_dashboard')
 def patient_dashboard():
